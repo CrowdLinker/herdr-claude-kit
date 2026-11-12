@@ -1,0 +1,125 @@
+#!/bin/sh
+# Remembers which Claude Code session runs in which Herdr terminal, so
+# `claude-restore` can resume them all after a reboot.
+#   claude-resume-hook start   (SessionStart hook)
+#   claude-resume-hook end     (SessionEnd hook)
+# Prints nothing (SessionStart output would be added to Claude's context)
+# and always exits 0 so it can never block a session.
+
+input=$(cat)
+[ -n "${HC_TERMINAL_ID:-}" ] || exit 0          # not inside a Herdr terminal
+command -v jq >/dev/null 2>&1 || exit 0
+
+HC="${CLAUDE_RESTORE_HC:-$HOME/.local/bin/herdr-core}"   # the override exists for tests only
+DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claude-resume"
+T="$HC_TERMINAL_ID"
+case "$T" in ""|*[!A-Za-z0-9_.-]*) exit 0 ;; esac
+FILE="$DIR/$T.json"
+SID=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)
+case "$SID" in ""|*[!A-Za-z0-9-]*) exit 0 ;; esac
+
+comm_of() { c=$(ps -o comm= -p "$1" 2>/dev/null); c=${c##*/}; printf '%s' "${c#-}"; }
+is_shell() { case "$(comm_of "$1")" in sh|bash|zsh|dash|ksh|fish) return 0 ;; esac; return 1; }
+is_claude() { [ "$(comm_of "$1")" = claude ]; }
+parent() { ps -o ppid= -p "$1" 2>/dev/null | tr -d ' '; }
+
+# Remove records of this session kept under OTHER terminals, except where that
+# terminal is still running a Claude (the session may be open in both, and
+# that record is then the only one left for it).
+drop_other_records() {
+  # Only when Herdr answers: if it can't be asked, "that terminal is gone" and
+  # "Herdr is busy" look the same, and a live session's record must survive.
+  "$HC" get "$T" --json >/dev/null 2>&1 || return 0
+  for o in "$DIR"/*.json; do
+    [ -f "$o" ] && [ "$o" != "$FILE" ] || continue
+    [ "$(jq -r '.session_id // empty' "$o" 2>/dev/null)" = "$SID" ] || continue
+    ot=$(jq -r '.terminal // empty' "$o" 2>/dev/null)
+    if [ -n "$ot" ]; then
+      opid=$("$HC" get "$ot" --json 2>/dev/null | jq -r 'select(.state == "live") | .foreground.pid // empty' 2>/dev/null)
+      [ -n "$opid" ] && is_claude "$opid" && continue
+    fi
+    rm -f "$o"
+  done
+}
+
+case "${1:-}" in
+start)
+  # Only record the Claude that is the terminal's foreground program, not a
+  # background `claude -p` or helper that merely inherited HC_TERMINAL_ID.
+  # 1. Find the program that launched this hook: the nearest ancestor that is
+  #    not a shell. Going by position rather than by name means a helper Claude
+  #    is never skipped over, whatever its process happens to be called.
+  me=$PPID i=0
+  while [ $i -lt 8 ] && [ "${me:-0}" -gt 1 ] 2>/dev/null && is_shell "$me"; do
+    me=$(parent "$me"); i=$((i + 1))
+  done
+  [ "${me:-0}" -gt 1 ] 2>/dev/null || exit 0
+  is_shell "$me" && exit 0
+  # 2. A Claude started by another Claude is a helper: ignore it at once.
+  p=$(parent "$me") i=0
+  while [ $i -lt 8 ] && [ "${p:-0}" -gt 1 ] 2>/dev/null; do
+    is_claude "$p" && exit 0
+    p=$(parent "$p"); i=$((i + 1))
+  done
+  # 3. It must be the terminal's foreground program. Herdr can take a moment
+  #    to notice a freshly started program, so allow ~2s for it to catch up.
+  i=0
+  while :; do
+    info=$("$HC" get "$T" --json 2>/dev/null) || exit 0
+    [ "$(printf '%s' "$info" | jq -r '.foreground.pid // empty' 2>/dev/null)" = "$me" ] && break
+    [ $i -ge 10 ] && exit 0
+    sleep 0.2; i=$((i + 1))
+  done
+  # 4. A one-shot `claude -p` typed at the prompt is not a session to restore.
+  printf '%s' "$info" | jq -e '.foreground.argv // [] | any(. == "-p" or . == "--print")' \
+    >/dev/null 2>&1 && exit 0
+  # 5. The terminal must belong to a Herdr tab; claude-restore uses the tab to
+  #    confirm it is typing into the right place.
+  [ -n "$(printf '%s' "$info" | jq -r '.labels["herdr.tab"] // empty' 2>/dev/null)" ] || exit 0
+
+  # The folder to resume from is the one Claude was started in. The hook
+  # input's cwd follows every `cd` Claude runs, so prefer the process's own
+  # folder, and of the candidates take the one that matches the project folder
+  # the transcript is stored under (resuming from elsewhere finds no session).
+  TP=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)
+  proj=${TP%/*}; proj=${proj##*/}
+  enc() { printf '%s' "$1" | sed 's/[^A-Za-z0-9]/-/g'; }
+  c1=$(printf '%s' "$info" | jq -r '.foreground.cwd // empty' 2>/dev/null)
+  c2=$(printf '%s' "$info" | jq -r '.cwd // empty' 2>/dev/null)
+  c3=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
+  CWD=""
+  if [ -n "$proj" ]; then
+    for c in "$c1" "$c2" "$c3"; do
+      [ -n "$c" ] && [ "$(enc "$c")" = "$proj" ] && { CWD=$c; break; }
+    done
+  fi
+  [ -n "$CWD" ] || CWD=${c1:-${c2:-$c3}}
+
+  mkdir -p "$DIR"
+  tmp="$FILE.$$"
+  printf '%s' "$info" | jq -c \
+    --arg sid "$SID" --arg cwd "$CWD" --arg tp "$TP" \
+    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{terminal: .address, tab: .labels["herdr.tab"], space: .labels["herdr.space"],
+      where: .labels.where, session_id: $sid, cwd: $cwd,
+      transcript_path: $tp, recorded_at: $at}' >"$tmp" 2>/dev/null \
+    && mv "$tmp" "$FILE" || { rm -f "$tmp"; exit 0; }
+  # This session now lives here. Drop an older record of it under another
+  # terminal (it crashed there and was resumed by hand in this one).
+  drop_other_records
+  ;;
+end)
+  # Forget the session only when you quit it on purpose. A reboot, crash or
+  # closed pane ends with another reason, so the record stays for restore.
+  reason=$(printf '%s' "$input" | jq -r '.reason // empty' 2>/dev/null)
+  case "$reason" in
+  prompt_input_exit|logout)
+    [ -f "$FILE" ] && [ "$(jq -r .session_id "$FILE" 2>/dev/null)" = "$SID" ] && rm -f "$FILE"
+    # Also forget it wherever it was left behind by a crash, so a session you
+    # quit on purpose can't come back from a stale record in another tab.
+    drop_other_records
+    ;;
+  esac
+  ;;
+esac
+exit 0

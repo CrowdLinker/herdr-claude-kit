@@ -1,0 +1,166 @@
+#!/bin/sh
+# Resume every recorded Claude Code session in its own Herdr terminal.
+# Run once, from any terminal, after a reboot or OS update.
+#   claude-restore                    resume them (each keeps the model it was using)
+#   claude-restore --default-model    resume them on the model set in ~/.claude/settings.json
+#   claude-restore --model <id>       resume them on that model
+#   claude-restore -n                 only show what it would do (combine with the above)
+#   claude-restore -l                 list what is recorded
+# Records are written by claude-resume-hook (SessionStart / SessionEnd hooks).
+
+HC="${CLAUDE_RESTORE_HC:-$HOME/.local/bin/herdr-core}"   # the override exists for tests only
+DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claude-resume"
+DRY=0 MODEL=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+  -n|--dry-run) DRY=1 ;;
+  -l|--list)
+    for f in "$DIR"/*.json; do [ -f "$f" ] && jq -r '"\(.terminal)\t\(.session_id)\t\(.where)"' "$f"; done
+    exit 0 ;;
+  --model) shift; MODEL="${1:-}"; [ -n "$MODEL" ] || { echo "claude-restore: --model needs a model id" >&2; exit 1; } ;;
+  --default-model)
+    MODEL=$(jq -r '.model // empty' "$HOME/.claude/settings.json" 2>/dev/null)
+    [ -n "$MODEL" ] || { echo "claude-restore: no \"model\" set in ~/.claude/settings.json" >&2; exit 1; } ;;
+  -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+  *) echo "claude-restore: unknown option $1 (try -h)" >&2; exit 1 ;;
+  esac
+  shift
+done
+
+command -v jq >/dev/null || { echo "claude-restore: jq is required" >&2; exit 1; }
+"$HC" server status >/dev/null 2>&1 || { echo "claude-restore: Herdr isn't running yet; open Herdr and try again." >&2; exit 1; }
+[ -n "$MODEL" ] && echo "Model for resumed sessions: $MODEL"
+
+# Quote a value for the shell it will be typed into (handles ' in folder names).
+sq() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+
+# True when the terminal sits at its own shell prompt: Herdr reports the
+# terminal's shell itself as the foreground program, and the operating system
+# agrees that the shell's process group owns the terminal. A script
+# (`bash deploy.sh`), `sh -c ...` or any other running program fails this, so
+# nothing is ever typed into a program that is waiting for input.
+at_prompt() {
+  spid=$(printf '%s' "$1" | jq -r '.pid // empty')
+  fpid=$(printf '%s' "$1" | jq -r '.foreground.pid // empty')
+  [ -n "$spid" ] && [ "$spid" = "$fpid" ] || return 1
+  set -- $(ps -o pgid=,tpgid= -p "$spid" 2>/dev/null)
+  [ $# -ge 2 ] && [ "$1" = "$2" ]
+}
+
+# Name of the terminal, other than $1, that has a record of session $2 and is
+# running a Claude right now. Restoring that session anywhere else would open
+# it twice.
+running_elsewhere() {
+  for o in "$DIR"/*.json; do
+    [ -f "$o" ] || continue
+    [ "$(jq -r '.session_id // empty' "$o" 2>/dev/null)" = "$2" ] || continue
+    ot=$(jq -r '.terminal // empty' "$o" 2>/dev/null)
+    [ -n "$ot" ] && [ "$ot" != "$1" ] || continue
+    ofg=$("$HC" get "$ot" --json 2>/dev/null | jq -r 'select(.state == "live") | .foreground.argv[0] // empty' 2>/dev/null)
+    [ "${ofg##*/}" = claude ] && { printf '%s' "$ot"; return 0; }
+  done
+  return 1
+}
+
+# When one session is recorded for several terminals (it crashed in one tab and
+# was later resumed by hand in another), only the newest record is restored.
+newest=$(for f in "$DIR"/*.json; do
+  [ -f "$f" ] && jq -r --arg f "$f" '[.session_id // "", .recorded_at // "", $f] | @tsv' "$f" 2>/dev/null
+done | sort -t "$(printf '\t')" -k1,1 -k2,2r | awk -F '\t' '!seen[$1]++ { print $3 }')
+
+found=0 resumed=0 self_sid="" self_cwd="" self_label=""
+for f in "$DIR"/*.json; do
+  [ -f "$f" ] || continue
+  found=1
+  t=$(jq -r '.terminal // empty' "$f" 2>/dev/null); sid=$(jq -r '.session_id // empty' "$f" 2>/dev/null)
+  tab=$(jq -r '.tab // empty' "$f" 2>/dev/null); where=$(jq -r '.where // "?"' "$f" 2>/dev/null)
+  cwd=$(jq -r '.cwd // empty' "$f" 2>/dev/null); tp=$(jq -r '.transcript_path // empty' "$f" 2>/dev/null)
+  label="$t ($where)"
+  case "$sid" in
+  ""|*[!A-Za-z0-9-]*) echo "skip  ${f##*/}: record is unreadable or has no valid session id (nothing to resume from it; see: claude-history -l)"; continue ;;
+  esac
+  hint="(resume by hand: claude --resume $sid)"
+
+  info=$("$HC" get "$t" --json 2>/dev/null)
+  if [ -z "$info" ] || [ "$(printf '%s' "$info" | jq -r .state)" != live ]; then
+    echo "skip  $label: terminal is gone $hint"; continue
+  fi
+  if [ -z "$tab" ]; then
+    echo "skip  $label: no tab was recorded, so the terminal can't be confirmed $hint"; continue
+  fi
+  if [ "$(printf '%s' "$info" | jq -r '.labels["herdr.tab"] // empty')" != "$tab" ]; then
+    echo "skip  $label: terminal $t now belongs to another tab $hint"; continue
+  fi
+  # The terminal this command was typed in: the only thing running there is
+  # this script, so its session is resumed in place once the others are sent.
+  # Herdr can take a moment to notice a freshly started program: allow ~2s.
+  self=0
+  if [ "$t" = "${HC_TERMINAL_ID:-}" ] && [ -t 0 ] && [ -t 1 ]; then
+    i=0
+    while [ "$(printf '%s' "$info" | jq -r '.foreground.pid // empty' 2>/dev/null)" != "$$" ] && [ $i -lt 10 ]; do
+      sleep 0.2; i=$((i + 1)); info=$("$HC" get "$t" --json 2>/dev/null)
+    done
+    [ "$(printf '%s' "$info" | jq -r '.foreground.pid // empty' 2>/dev/null)" = "$$" ] && self=1
+  fi
+  fg=$(printf '%s' "$info" | jq -r '.foreground.argv[0] // empty' 2>/dev/null); fg=${fg##*/}; fg=${fg#-}
+  if [ $self = 0 ]; then
+    case "$fg" in
+    zsh|bash|fish|sh|nu|dash)
+      if ! at_prompt "$info"; then
+        echo "skip  $label: a program is running in its shell $hint"; continue
+      fi ;;
+    claude) echo "skip  $label: already running claude"; continue ;;
+    *) echo "skip  $label: already running ${fg:-something} $hint"; continue ;;
+    esac
+  fi
+  if other=$(running_elsewhere "$t" "$sid"); then
+    echo "skip  $label: this session is already running in $other (if it isn't, resume by hand: claude --resume $sid)"; continue
+  fi
+  if ! printf '%s\n' "$newest" | grep -Fxq "$f"; then
+    echo "skip  $label: an older record; this session is restored through its newer record for another terminal"; continue
+  fi
+  if [ -n "$tp" ] && [ ! -f "$tp" ]; then
+    echo "skip  $label: transcript $tp is missing $hint"; continue
+  fi
+  if [ -n "$cwd" ] && [ ! -d "$cwd" ]; then
+    echo "skip  $label: folder $cwd no longer exists $hint"; continue
+  fi
+
+  # If Herdr's core was (re)started from inside a Claude session, its shells
+  # inherit CLAUDE_CODE_CHILD_SESSION and every resumed session silently stops
+  # saving its transcript. Always strip the marker.
+  cmd="env -u CLAUDE_CODE_CHILD_SESSION claude --resume $sid"
+  [ -n "$MODEL" ] && cmd="$cmd --model $(sq "$MODEL")"
+  [ -n "$cwd" ] && cmd="cd $(sq "$cwd") && $cmd"
+  if [ $self = 1 ]; then
+    self_sid=$sid self_cwd=$cwd self_label=$label
+    [ $DRY = 1 ] && echo "would $label: (this terminal, after the others) $cmd"
+  elif [ $DRY = 1 ]; then
+    echo "would $label: $cmd"
+  # Send with HC_TERMINAL_ID removed. Observed on herdr-core 0.1.20: when this
+  # script runs in a Herdr terminal that has hosted a Claude and the target has
+  # too, `send` wraps the text in <hc from="..."> tags. zsh rejects that as a
+  # parse error while the send itself still exits 0. Without the variable the
+  # text arrives plain. Nothing here checks what actually arrived, so re-test
+  # this after a Herdr update.
+  elif env -u HC_TERMINAL_ID "$HC" send "$t" "$cmd" >/dev/null 2>&1; then
+    echo "ok    $label"; resumed=$((resumed + 1))
+    sleep 1   # stagger launches so MCP servers don't all start at once
+  else
+    echo "fail  $label: hc send failed $hint"
+  fi
+done
+
+[ $found = 1 ] || echo "No sessions recorded yet in $DIR"
+[ $DRY = 1 ] || [ $found = 0 ] || echo "Resumed $resumed session(s)${self_sid:+ in other terminals}."
+
+# Last, the session that belongs to the terminal this was run in: become it.
+if [ $DRY = 0 ] && [ -n "$self_sid" ]; then
+  echo "ok    $self_label: resuming here"
+  [ -z "$self_cwd" ] || cd "$self_cwd" || { echo "fail  $self_label: can't enter $self_cwd (resume by hand: claude --resume $self_sid)"; exit 1; }
+  if [ -n "$MODEL" ]; then
+    exec env -u CLAUDE_CODE_CHILD_SESSION claude --resume "$self_sid" --model "$MODEL"
+  else
+    exec env -u CLAUDE_CODE_CHILD_SESSION claude --resume "$self_sid"
+  fi
+fi
