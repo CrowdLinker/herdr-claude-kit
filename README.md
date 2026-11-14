@@ -2,7 +2,7 @@
 
 Bring every long-running Claude Code session back after a reboot with one command, read a session's full history including everything from before compaction, and a small agent roster to go with it.
 
-Built and tested on macOS with zsh, herdr-core 0.1.20 and Claude Code 2.1.322. Tested by stopping and restarting Herdr's core, which leaves every tab as a plain shell in its folder, the same state a reboot leaves. Re-test after you update either tool.
+Built and tested on macOS with zsh, herdr-core 0.1.20 and 0.1.21, and Claude Code 2.1.322 and 2.1.325. Tested through a real macOS reboot (seven sessions restored with one command) and by stopping and restarting Herdr's core, which leaves every tab in the same state. Re-test after you update either tool.
 
 ## What is here
 
