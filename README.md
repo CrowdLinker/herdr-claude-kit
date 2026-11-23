@@ -2,7 +2,7 @@
 
 Bring every long-running Claude Code session back after a reboot with one command, read a session's full history including everything from before compaction, and a small agent roster to go with it.
 
-Built and tested on macOS with zsh, herdr-core 0.1.20 and 0.1.21, and Claude Code 2.1.322 and 2.1.323. Tested through a real macOS reboot (seven sessions restored with one command) and by stopping and restarting Herdr's core, which leaves every tab in the same state. Re-test after you update either tool.
+Built and tested on macOS with zsh, herdr-core 0.1.20 to 0.1.22, and Claude Code 2.1.322 to 2.1.330. Tested through a real macOS reboot (seven sessions restored with one command) and by stopping and restarting Herdr's core, which leaves every tab in the same state. Re-test after you update either tool.
 
 ## What is here
 
@@ -46,7 +46,7 @@ Built and tested on macOS with zsh, herdr-core 0.1.20 and 0.1.21, and Claude Cod
 ## Things to know
 
 - Never restart Herdr's core, or run `claude-restore`, from a shell that a Claude session started. Sessions restored that way are treated as child sessions and are left out of resume and history. Run it yourself from a plain terminal.
-- A resumed session keeps the model it was using. `claude-restore --default-model` brings every session back on the model in your settings.
+- `claude-restore` brings every session back on the model in your settings (on its own, a resumed session keeps the model it was using). `claude-restore --keep-model` keeps each session's old model.
 - Quit a session with `/exit` when you are done with it, so it does not come back after the next reboot.
 - The scripts call `herdr-core` at `~/.local/bin/herdr-core`. If yours lives elsewhere, change the `HC=` line near the top of `claude-restore` and `claude-resume-hook`. A wrong path fails quietly: `claude-restore -l` stays empty and `claude-restore` says Herdr isn't running.
 - A shell that is waiting for typed input (a half-finished command) looks idle to `claude-restore`.

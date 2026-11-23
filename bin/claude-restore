@@ -1,8 +1,8 @@
 #!/bin/sh
 # Resume every recorded Claude Code session in its own Herdr terminal.
 # Run once, from any terminal, after a reboot or OS update.
-#   claude-restore                    resume them (each keeps the model it was using)
-#   claude-restore --default-model    resume them on the model set in ~/.claude/settings.json
+#   claude-restore                    resume them on the model set in ~/.claude/settings.json
+#   claude-restore --keep-model       resume them on the model each one was using
 #   claude-restore --model <id>       resume them on that model
 #   claude-restore -n                 only show what it would do (combine with the above)
 #   claude-restore -l                 list what is recorded
@@ -10,7 +10,7 @@
 
 HC="${CLAUDE_RESTORE_HC:-$HOME/.local/bin/herdr-core}"   # the override exists for tests only
 DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claude-resume"
-DRY=0 MODEL=""
+DRY=0 MODEL="" KEEP=0
 while [ $# -gt 0 ]; do
   case "$1" in
   -n|--dry-run) DRY=1 ;;
@@ -18,9 +18,8 @@ while [ $# -gt 0 ]; do
     for f in "$DIR"/*.json; do [ -f "$f" ] && jq -r '"\(.terminal)\t\(.session_id)\t\(.where)"' "$f"; done
     exit 0 ;;
   --model) shift; MODEL="${1:-}"; [ -n "$MODEL" ] || { echo "claude-restore: --model needs a model id" >&2; exit 1; } ;;
-  --default-model)
-    MODEL=$(jq -r '.model // empty' "$HOME/.claude/settings.json" 2>/dev/null)
-    [ -n "$MODEL" ] || { echo "claude-restore: no \"model\" set in ~/.claude/settings.json" >&2; exit 1; } ;;
+  --keep-model) KEEP=1 ;;
+  --default-model) ;;   # now the default; still accepted
   -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
   *) echo "claude-restore: unknown option $1 (try -h)" >&2; exit 1 ;;
   esac
@@ -28,6 +27,11 @@ while [ $# -gt 0 ]; do
 done
 
 command -v jq >/dev/null || { echo "claude-restore: jq is required" >&2; exit 1; }
+# Default: the model in settings (a resumed session otherwise keeps its old model).
+if [ -z "$MODEL" ] && [ $KEEP = 0 ]; then
+  MODEL=$(jq -r '.model // empty' "$HOME/.claude/settings.json" 2>/dev/null)
+  [ -n "$MODEL" ] || echo "No \"model\" in ~/.claude/settings.json; each session keeps its own model."
+fi
 "$HC" server status >/dev/null 2>&1 || { echo "claude-restore: Herdr isn't running yet; open Herdr and try again." >&2; exit 1; }
 [ -n "$MODEL" ] && echo "Model for resumed sessions: $MODEL"
 

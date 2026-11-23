@@ -16,10 +16,10 @@ It reopens every recorded Claude session in its own Herdr tab, one second apart.
 |---|---|
 | `claude-restore -n` | Shows what it would do, without doing it |
 | `claude-restore -l` | Lists which session is recorded for each tab |
-| `claude-restore --default-model` | Restores every session on the model in your settings |
+| `claude-restore --keep-model` | Restores every session on the model it was using (the default is the model in your settings) |
 | `claude-restore --model <id>` | Restores every session on a specific model |
 
-Resumed sessions keep the model they were last using unless you pass one of the two model options.
+Without a model option, sessions come back on the model in `~/.claude/settings.json`. On its own, `claude --resume` keeps the model a session was last using, so after you change models in settings, a plain `claude-restore` moves every tab over.
 
 ## Herdr core commands (run from a plain terminal, not from inside a Claude session)
 
@@ -58,17 +58,17 @@ The line says why. When the session needs you, it ends with a command like `clau
 
 ## After changing the main model
 
-1. From a plain terminal, when no session is mid-task: `hc server stop; hc server start; sleep 3; claude-restore --default-model`
+1. From a plain terminal, when no session is mid-task: `hc server stop; hc server start; sleep 3; claude-restore`
 2. Type `/compact` in each tab. A conversation keeps the advisor it started with, and the advisor has to rank at or above the main model, so sessions moved to a stronger model have no advisor until they are compacted.
 
 ## Agent roster
 
 | Role | Model | Effort | What it does |
 |---|---|---|---|
-| Main session | Fable 5.2 (1M context) | high | Plans, decides, does most of the work |
+| Main session | Opus 5.5 | high | Plans, decides, does most of the work |
 | Advisor | Fable 5.2 | high | Reviews the whole conversation before big plans, outward-facing actions and "done" |
 | worker | Opus | high | Carries out decided plans; never sends or publishes unless told to |
-| reviewer | Opus | xhigh | Checks code before it is called done; reports problems, never edits |
+| reviewer | Opus | high | Checks code before it is called done; reports problems, never edits |
 | researcher | Sonnet | high | Web and docs lookups, with sources |
 | explorer | Sonnet | high | Read-only file and code search |
 
