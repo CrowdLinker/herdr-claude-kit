@@ -72,6 +72,15 @@ The line says why. When the session needs you, it ends with a command like `clau
 | researcher | Sonnet | high | Web and docs lookups, with sources |
 | explorer | Sonnet | high | Read-only file and code search |
 
+## If you use Orca instead
+
+| Situation | What to do |
+|---|---|
+| After a reboot | Open Orca. Click any tab that hasn't started yet. |
+| Changed the main model | `/model <model>` in each tab, then send one message |
+| Test the reboot path (macOS, nothing mid-task) | Quit Orca, run `pkill -f "orca/daemon-host"` in a plain terminal (ends every Orca terminal), reopen Orca |
+| Move a session from Herdr | Note its id and folder, `/exit` it in Herdr, then in Orca: `cd <folder> && claude --resume <id> --model <model>` and send one message |
+
 ## Where things live
 
 - Scripts: `~/.local/bin/claude-restore`, `claude-history`, `claude-resume-hook`
